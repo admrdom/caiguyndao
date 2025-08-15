@@ -18,7 +18,7 @@ from tkinter import ttk, messagebox, PhotoImage
 
 APP_VER = "V2.0.1"                         # ← cập nhật mỗi lần bạn phát hành
 APP_TITLE = f"Tiện ích cài Win Dạo {APP_VER}"
-APP_PASSWORD = "bachkhoa"                     # ← ĐỔI mật khẩu theo ý bạn
+APP_PASSWORD = "1"                     # ← ĐỔI mật khẩu theo ý bạn
 
 # ===== Optional Pillow để resize icon PNG về 20x20 =====
 try:
