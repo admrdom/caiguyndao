@@ -1,351 +1,174 @@
-# kichhoat.py — Kích hoạt Win/Office (UI tối giản, downloader robust)
-# - 3 nút: Kích hoạt Windows, Kích hoạt Office, Gỡ kích hoạt Office
-# - Tải & chạy script HỢP PHÁP từ URL (PowerShell: IWR → BITS → WebClient), tự xoá file tạm
-# - Không dùng 'requests'; log tải chỉ: "Đang tải script. Vui lòng chờ…"
-# - Nếu không cấu hình URL: yêu cầu Product Key hợp pháp (Windows/Office) hoặc gỡ key Office
-# - Mở qua main.py: authorize(token) + open_window(root)
+import customtkinter
+import os
+import sys
+import threading
+import requests
+import subprocess
+from tkinter import messagebox
 
-import os, sys, queue, threading, subprocess, tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, scrolledtext
+# --- Cấu hình và Hằng số ---
+OHOOK_SCRIPT_URL = "https://raw.githubusercontent.com/massgravel/Microsoft-Activation-Scripts/master/MAS/Separate-Files-Version/Activators/Ohook_Activation_AIO.cmd"
+HWID_SCRIPT_URL = "https://raw.githubusercontent.com/massgravel/Microsoft-Activation-Scripts/master/MAS/Separate-Files-Version/Activators/HWID_Activation.cmd"
+TEMP_DIR = os.environ.get("TEMP", ".")
 
-# ====== (Tuỳ chọn) URL script HỢP PHÁP của bạn ======
-# Để trống => dùng phương án hợp pháp bằng Product Key
-WINDOWS_ACTIVATE_URL         = "https://raw.githubusercontent.com/massgravel/Microsoft-Activation-Scripts/refs/heads/master/MAS/Separate-Files-Version/Activators/HWID_Activation.cmd"  # ví dụ: "https://raw.githubusercontent.com/your-org/your-repo/main/activate_win.cmd"
-OFFICE_ACTIVATE_URL          = "https://raw.githubusercontent.com/massgravel/Microsoft-Activation-Scripts/refs/heads/master/MAS/Separate-Files-Version/Activators/Ohook_Activation_AIO.cmd"  # ví dụ: "https://raw.githubusercontent.com/your-org/your-repo/main/activate_office.cmd"
-OFFICE_UNINSTALL_LICENSE_URL = "https://raw.githubusercontent.com/massgravel/Microsoft-Activation-Scripts/refs/heads/master/MAS/Separate-Files-Version/Activators/Ohook_Activation_AIO.cmd"  # ví dụ: "https://raw.githubusercontent.com/your-org/your-repo/main/uninstall_office_license.cmd"
-
-TEMP_WIN_FILE   = "win_activate.cmd"
-TEMP_OFF_FILE   = "office_activate.cmd"
-TEMP_OFF_UNFILE = "office_uninstall.cmd"
-
-# ====== Guard: chỉ mở từ main.py ======
-_AUTH_TOKEN = None
-def authorize(token: str):
-    global _AUTH_TOKEN
-    _AUTH_TOKEN = token
-
-# ====== Resource helper (hỗ trợ PyInstaller) ======
+# --- Hàm tiện ích ---
 def res_path(*parts):
-    base = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
-    return os.path.join(base, *parts)
-
-# ====== Tiện ích shell ======
-def run_stream(cmd, q, shell=True):
-    """Chạy lệnh và đẩy stdout/stderr theo dòng vào queue; khi xong gửi None."""
+    """Lấy đường dẫn tài nguyên an toàn cho cả môi trường dev và PyInstaller."""
     try:
-        p = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            shell=shell,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
-        for line in iter(p.stdout.readline, ''):
-            q.put(line)
-        p.stdout.close()
-        p.wait()
-        q.put(f"\n--- Hoàn tất. Mã thoát: {p.returncode} ---\n")
-    except Exception as e:
-        q.put(f"[Lỗi] {e}\n")
-    finally:
-        q.put(None)
-
-def run_cmd(cmd: str) -> tuple[bool, str]:
-    try:
-        out = subprocess.check_output(
-            cmd, shell=True, stderr=subprocess.STDOUT,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
-        return True, out.decode("utf-8", errors="ignore")
-    except subprocess.CalledProcessError as e:
-        return False, (e.output or b"").decode("utf-8", errors="ignore")
-
-def _to_raw_url(url: str) -> str:
-    """Chuyển link GitHub dạng blob -> raw (nếu cần)."""
-    try:
-        if "github.com" in url and "/blob/" in url:
-            url = url.replace("github.com/", "raw.githubusercontent.com/").replace("/blob/", "/")
+        base_path = sys._MEIPASS
     except Exception:
-        pass
-    return url
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, *parts)
 
-def _ps_save_and_run(ps_code: str) -> tuple[bool, str]:
-    """Ghi 1 script PowerShell tạm rồi chạy nó (tránh one-liner khó quote)."""
-    import tempfile
-    tmp_dir = os.environ.get("TEMP", tempfile.gettempdir())
-    ps_path = os.path.join(tmp_dir, f"_dl_{os.getpid()}.ps1")
-    with open(ps_path, "w", encoding="utf-8") as f:
-        f.write(ps_code)
-    ok, out = run_cmd(f'powershell -NoProfile -ExecutionPolicy Bypass -File "{ps_path}"')
-    try:
-        if os.path.isfile(ps_path):
-            os.remove(ps_path)
-    except Exception:
-        pass
-    return ok, out
+def open_link(url: str):
+    """Mở một URL trong trình duyệt mặc định."""
+    if sys.platform == "win32":
+        os.startfile(url)
+    else:
+        subprocess.Popen(["xdg-open", url])
 
-def run_script_from_url_to_temp(url: str, filename: str, args: list[str], q):
-    """
-    Tải script HỢP PHÁP về %TEMP% (IWR → BITS → WebClient), chạy, xong tự xoá.
-    Log khi tải chỉ hiển thị: 'Đang tải script. Vui lòng chờ…'
-    """
-    import tempfile
-    tmp_dir = os.environ.get("TEMP", tempfile.gettempdir())
-    # Bảo vệ: nếu filename rỗng => dùng tên mặc định an toàn
-    safe_filename = filename or f"script_{os.getpid()}.cmd"
-    path = os.path.join(tmp_dir, safe_filename)
+def add_footer(parent_frame):
+    """Thêm footer vào cuối cửa sổ."""
+    footer_frame = customtkinter.CTkFrame(parent_frame, fg_color="transparent")
+    footer_frame.grid(row=4, column=0, padx=10, pady=(5, 10), sticky="ew")
+    
+    author_label = customtkinter.CTkLabel(footer_frame, text="Tiện ích này được phát triển bởi Trần Hà", text_color="gray")
+    author_label.pack()
 
-    # PowerShell script đa phương án tải
-    raw = _to_raw_url(url).replace("'", "''")
-    outp = path.replace("'", "''")
-    ps = f"""
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-try {{
-  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-}} catch {{ }}
+    link_label = customtkinter.CTkLabel(footer_frame, text="Liên Hệ: facebook.com/DomBM.Rika/", text_color=("#3a7ebf", "#1f6aa5"), cursor="hand2")
+    link_label.pack()
+    link_label.bind("<Button-1>", lambda e: open_link("https://www.facebook.com/DomBM.Rika/"))
 
-$u = '{raw}'
-$o = '{outp}'
-$ua = 'Mozilla/5.0'
+def create_activation_widgets(parent_frame):
+    """Tạo giao diện cho chức năng kích hoạt, giữ lại layout gốc đơn giản."""
 
-Write-Output 'Đang tải script. Vui lòng chờ…'
+    parent_frame.grid_rowconfigure(3, weight=1)
+    parent_frame.grid_columnconfigure(0, weight=1)
 
-function Try-IWR {{
-  try {{
-    Invoke-WebRequest -Uri $u -Headers @{{'User-Agent'=$ua}} -UseBasicParsing -OutFile $o -TimeoutSec 90
-    return $true
-  }} catch {{ Write-Output ('IWR: ' + $_.Exception.Message); return $false }}
-}}
+    # --- Tiêu đề chính ---
+    main_title_label = customtkinter.CTkLabel(parent_frame, text="Kích hoạt Bản quyền Windows & Office", font=customtkinter.CTkFont(size=20, weight="bold"))
+    main_title_label.grid(row=0, column=0, padx=10, pady=(10, 0))
 
-function Try-BITS {{
-  try {{
-    Start-BitsTransfer -Source $u -Destination $o -ErrorAction Stop
-    return $true
-  }} catch {{ Write-Output ('BITS: ' + $_.Exception.Message); return $false }}
-}}
+    # --- Tiêu đề phụ ---
+    title_label = customtkinter.CTkLabel(parent_frame, text="Chọn phương thức kích hoạt", font=customtkinter.CTkFont(size=16))
+    title_label.grid(row=1, column=0, padx=10, pady=(0, 10))
 
-function Try-WebClient {{
-  try {{
-    $wc = New-Object Net.WebClient
-    $wc.Headers['User-Agent'] = $ua
-    $wc.DownloadFile($u, $o)
-    return $true
-  }} catch {{ Write-Output ('WebClient: ' + $_.Exception.Message); return $false }}
-}}
+    # --- Khung chứa các nút ---
+    button_frame = customtkinter.CTkFrame(parent_frame, fg_color="transparent")
+    button_frame.grid(row=2, column=0, padx=10, pady=5)
+    button_frame.grid_columnconfigure((0, 1, 2), weight=1)
 
-$ok = $false
-if (-not $ok) {{ $ok = Try-IWR }}
-if (-not $ok) {{ $ok = Try-BITS }}
-if (-not $ok) {{ $ok = Try-WebClient }}
+    # --- Ô văn bản hiển thị log ---
+    log_textbox = customtkinter.CTkTextbox(parent_frame, wrap="word", font=("Courier New", 11), text_color=("gray90", "gray90"), fg_color="black")
+    log_textbox.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="nsew")
+    log_textbox.insert("end", "Chào mừng đến với công cụ kích hoạt.\n\n"
+                              "Chọn một chức năng để bắt đầu.\n"
+                              "Một cửa sổ dòng lệnh sẽ hiện ra, vui lòng làm theo hướng dẫn trong đó.\n")
 
-if (-not $ok) {{
-  Write-Output '[Lỗi] Không tải được file.'
-  exit 1
-}}
+    # --- Thêm Footer ---
+    add_footer(parent_frame)
 
-if (!(Test-Path $o)) {{
-  Write-Output '[Lỗi] File không tồn tại sau khi tải.'
-  exit 1
-}}
+    # --- Hàm xử lý logic ---
+    def activation_logic(log_widget, buttons, task):
+        """Hàm chứa logic tải và chạy script, được thực thi trong một luồng riêng."""
+        
+        def log(message):
+            log_widget.after(0, lambda: log_widget.insert("end", f"{message}\n"))
 
-$len = (Get-Item $o).Length
-if ($len -lt 16) {{
-  Write-Output '[Lỗi] File rỗng hoặc quá nhỏ.'
-  exit 1
-}}
+        if task == "activate_windows":
+            url = HWID_SCRIPT_URL
+            script_filename = "HWID_Activation.cmd"
+            param = ""
+            title = "Kich hoat Windows (HWID)"
+        else:
+            url = OHOOK_SCRIPT_URL
+            script_filename = "Ohook_Activation_AIO.cmd"
+            param = "/Ohook" if task == "activate_office" else "/UnOhook"
+            title = "Kich hoat Office" if task == "activate_office" else "Go bo Kich hoat Office"
 
-Write-Output 'Đã tải xong script.'
-"""
-
-    def worker():
+        script_path = os.path.join(TEMP_DIR, script_filename)
+        
         try:
-            ok, out = _ps_save_and_run(ps)
-            if not ok:
-                q.put(out.strip() or "[Lỗi] Không tải được file."); q.put(None); return
+            log("Đang tải script... Vui Lòng Chờ!")
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            
+            with open(script_path, "wb") as f:
+                f.write(response.content)
+            
+            log("-> Đang mở cửa sổ dòng lệnh. Vui lòng làm theo hướng dẫn...")
+            
+            command = f'start "ADMRDOM - {title}" /wait cmd.exe /c "chcp 65001 > nul & \"{script_path}\" {param} & pause"'
+            subprocess.run(command, shell=True, check=True, creationflags=0x08000000)
 
-            # Chạy script vừa tải
-            if path.lower().endswith(".ps1"):
-                cmd = f'powershell -NoProfile -ExecutionPolicy Bypass -File "{path}" {" ".join(args)}'
-            else:
-                # thêm chcp 65001 để log Unicode đẹp hơn (không bắt buộc)
-                cmd = f'cmd.exe /d /c chcp 65001>nul & "{path}" {" ".join(args)}'
-            run_stream(cmd, q)
+            log(f"\n-> Quá trình '{title}' đã kết thúc.")
+            messagebox.showinfo("Hoàn tất", f"Quá trình '{title}' đã kết thúc.")
+
+        except requests.exceptions.RequestException as e:
+            log(f"!!! LỖI: Không thể tải công cụ.\nChi tiết: {e}")
+            messagebox.showerror("Lỗi Mạng", f"Không thể tải công cụ kích hoạt.\nChi tiết: {e}")
+        except subprocess.CalledProcessError:
+            log("!!! LỖI: Quá trình bị hủy hoặc có lỗi trong script.")
+            messagebox.showwarning("Cảnh báo", "Quá trình đã bị hủy hoặc có lỗi xảy ra.")
         except Exception as e:
-            q.put(f"[Lỗi] {e}")
+            log(f"!!! LỖI KHÔNG XÁC ĐỊNH: {e}")
+            messagebox.showerror("Lỗi không xác định", f"Đã xảy ra lỗi không mong muốn: {e}")
         finally:
-            try:
-                if os.path.isfile(path):
-                    os.remove(path)
-                    q.put("Đã xoá file tạm.")
-            except Exception as e:
-                q.put(f"[Cảnh báo] Không xoá được file tạm: {e}")
-            q.put(None)
+            if os.path.exists(script_path):
+                try: os.remove(script_path)
+                except OSError: pass
+            for btn in buttons:
+                btn.configure(state="normal")
 
-    threading.Thread(target=worker, daemon=True).start()
+    def start_task(task):
+        """Hàm được gọi khi nhấn nút, để bắt đầu luồng."""
+        log_textbox.delete("1.0", "end")
+        all_buttons = [win_activate_button, office_activate_button, office_uninstall_button]
+        for btn in all_buttons:
+            btn.configure(state="disabled")
+        
+        thread = threading.Thread(target=activation_logic, args=(log_textbox, all_buttons, task))
+        thread.daemon = True
+        thread.start()
 
-def find_ospp_vbs() -> str | None:
-    """Tìm OSPP.VBS (Office16/Click-to-Run)."""
-    cands = [
-        r"C:\Program Files\Microsoft Office\Office16\OSPP.VBS",
-        r"C:\Program Files (x86)\Microsoft Office\Office16\OSPP.VBS",
-        r"C:\Program Files\Microsoft Office\root\Office16\OSPP.VBS",
-        r"C:\Program Files (x86)\Microsoft Office\root\Office16\OSPP.VBS",
-    ]
-    for p in cands:
-        if os.path.exists(p): return p
-    return None
+    # --- Các nút bấm ---
+    win_activate_button = customtkinter.CTkButton(
+        button_frame,
+        text="Kích hoạt Windows (HWID)",
+        command=lambda: start_task("activate_windows")
+    )
+    win_activate_button.grid(row=0, column=0, padx=5)
 
-def normalize_key(raw: str) -> str:
-    """Chuẩn hoá key 25 ký tự -> XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"""
-    if not raw: return ""
-    k = raw.replace("-", "").replace(" ", "").upper()
-    if len(k) == 25 and k.isalnum():
-        return "-".join([k[i:i+5] for i in range(0,25,5)])
-    return ""
+    office_activate_button = customtkinter.CTkButton(
+        button_frame,
+        text="Kích hoạt Office",
+        command=lambda: start_task("activate_office")
+    )
+    office_activate_button.grid(row=0, column=1, padx=5)
 
-# ====== UI ======
-class KichHoatUI(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Kích hoạt Win - Office")
-        self.geometry("760x520")
-        self.resizable(False, False)
-        self.transient(parent); self.grab_set()
-        self.configure(bg="#f0f0f0")
+    office_uninstall_button = customtkinter.CTkButton(
+        button_frame,
+        text="Gỡ bỏ Kích hoạt Office",
+        command=lambda: start_task("unactivate_office")
+    )
+    office_uninstall_button.grid(row=0, column=2, padx=5)
 
-        # icon tiêu đề
-        ico = res_path("img", "logo.ico")
-        if os.path.exists(ico):
-            try: self.iconbitmap(ico)
-            except Exception: pass
 
-        self.q = queue.Queue()
-        self._build_ui()
-        self._pump()
+# ===== API cho main.py =====
+def open_window(root):
+    """Hàm được gọi từ main.py để mở cửa sổ kích hoạt."""
+    window = customtkinter.CTkToplevel(root)
+    window.title("Kích hoạt Bản quyền Windows & Office")
+    window.geometry("700x500")
+    window.transient(root)
+    window.grab_set()
 
-    def _build_ui(self):
-        tk.Label(self, text="Chọn phương thức kích hoạt",
-                 font=("Segoe UI", 12, "bold"), bg="#f0f0f0").pack(pady=10)
-
-        row = tk.Frame(self, bg="#f0f0f0"); row.pack(pady=(0,8))
-        self.btn_w_activate = tk.Button(row, text="Kích hoạt Windows", command=self.on_win_activate)
-        self.btn_o_activate = tk.Button(row, text="Kích hoạt Office",  command=self.on_office_activate)
-        self.btn_o_uninst   = tk.Button(row, text="Gỡ kích hoạt Office", command=self.on_office_uninstall)
-        self.btn_w_activate.pack(side="left", padx=6)
-        self.btn_o_activate.pack(side="left", padx=6)
-        self.btn_o_uninst.pack(side="left", padx=6)
-
-        self.out = scrolledtext.ScrolledText(self, wrap=tk.WORD, state="disabled",
-                                             font=("Consolas", 10), bg="black", fg="white")
-        self.out.pack(fill="both", expand=True, padx=8, pady=8)
-
-        # footer bản quyền
-        sep = ttk.Separator(self); sep.pack(side="bottom", fill="x", pady=(6,0))
-        box = ttk.Frame(self); box.pack(side="bottom", fill="x", pady=(4,6))
-        ttk.Label(box, text="Tiện ích này được phát triển bởi Trần Hà",
-                  foreground="grey", anchor="center").pack(fill="x")
-        link = ttk.Label(box, text="Liên Hệ: facebook.com/DomBM.Rika/",
-                         foreground="blue", cursor="hand2", anchor="center")
-        link.pack(fill="x")
-        link.bind("<Button-1>", lambda e: self._open("https://www.facebook.com/DomBM.Rika/"))
-
-    # ---- helpers ----
-    def _open(self, url):
-        if sys.platform == "win32": os.startfile(url)
-        else: subprocess.Popen(["xdg-open", url])
-
-    def _append(self, s: str):
-        self.out.config(state="normal")
-        self.out.insert("end", s if s.endswith("\n") else s + "\n")
-        self.out.see("end")
-        self.out.config(state="disabled")
-
-    def _set_log(self, s: str):
-        self.out.config(state="normal"); self.out.delete("1.0", "end"); self.out.insert("1.0", s); self.out.config(state="disabled")
-
-    def _set_btns(self, enabled: bool):
-        st = "normal" if enabled else "disabled"
-        self.btn_w_activate.config(state=st)
-        self.btn_o_activate.config(state=st)
-        self.btn_o_uninst.config(state=st)
-
-    def _pump(self):
+    # Thêm icon cho cửa sổ
+    icon_path = res_path("img", "logo.ico")
+    if os.path.exists(icon_path):
         try:
-            while True:
-                line = self.q.get_nowait()
-                if line is None:
-                    self._set_btns(True)
-                    self.bell()
-                    break
-                self._append(line)
-        except queue.Empty:
-            pass
-        self.after(120, self._pump)
+            window.iconbitmap(icon_path)
+        except Exception:
+            pass # Bỏ qua nếu không set được icon
 
-    # ---- actions ----
-    def on_win_activate(self):
-        if WINDOWS_ACTIVATE_URL:
-            # KHÔNG set log ở đây để tránh trùng dòng; worker sẽ in "Đang tải script..."
-            self._set_btns(False)
-            run_script_from_url_to_temp(WINDOWS_ACTIVATE_URL, TEMP_WIN_FILE, [], self.q)
-        else:
-            key = simpledialog.askstring("Nhập key Windows", "Nhập Product Key 25 ký tự:", parent=self)
-            key = normalize_key(key or "")
-            if not key:
-                messagebox.showerror("Lỗi", "Key không hợp lệ."); return
-            if not messagebox.askyesno("Xác nhận", f"Cài key & kích hoạt Windows với key:\n{key}?"): return
-            self._set_log(f"Đang cài key Windows: {key}\n"); self._set_btns(False)
-            ps = r'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' \
-                 r'& {cscript //Nologo "$env:SystemRoot\System32\slmgr.vbs" /ipk ' + key + r'; ' \
-                 r'cscript //Nologo "$env:SystemRoot\System32\slmgr.vbs" /ato }'
-            cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command ' + ps
-            threading.Thread(target=run_stream, args=(cmd, self.q), daemon=True).start()
-
-    def on_office_activate(self):
-        if OFFICE_ACTIVATE_URL:
-            self._set_btns(False)
-            run_script_from_url_to_temp(OFFICE_ACTIVATE_URL, TEMP_OFF_FILE, [], self.q)
-        else:
-            ospp = find_ospp_vbs()
-            if not ospp:
-                messagebox.showerror("Không tìm thấy OSPP.VBS", "Không xác định được đường dẫn OSPP.VBS (Office16)."); return
-            key = simpledialog.askstring("Nhập key Office", "Nhập Product Key 25 ký tự:", parent=self)
-            key = normalize_key(key or "")
-            if not key:
-                messagebox.showerror("Lỗi", "Key không hợp lệ."); return
-            if not messagebox.askyesno("Xác nhận", f"Cài key & kích hoạt Office với key:\n{key}?"): return
-            self._set_log(f"OSPP: {ospp}\nĐang cài key Office: {key}\n"); self._set_btns(False)
-            ps = f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & {{cscript //Nologo "{ospp}" /inpkey:{key}; cscript //Nologo "{ospp}" /act }}'
-            cmd = 'powershell -NoProfile -ExecutionPolicy Bypass -Command ' + ps
-            threading.Thread(target=run_stream, args=(cmd, self.q), daemon=True).start()
-
-    def on_office_uninstall(self):
-        if OFFICE_UNINSTALL_LICENSE_URL:
-            self._set_btns(False)
-            run_script_from_url_to_temp(OFFICE_UNINSTALL_LICENSE_URL, TEMP_OFF_UNFILE, [], self.q)
-        else:
-            ospp = find_ospp_vbs()
-            if not ospp:
-                messagebox.showerror("Không tìm thấy OSPP.VBS", "Không xác định được đường dẫn OSPP.VBS (Office16)."); return
-            last5 = simpledialog.askstring("Gỡ key Office", "Nhập 5 ký tự cuối của key:", parent=self)
-            if not last5: return
-            last5 = last5.strip().upper()
-            if len(last5) != 5:
-                messagebox.showerror("Lỗi", "Cần đúng 5 ký tự cuối."); return
-            self._set_log(f"OSPP: {ospp}\nĐang gỡ key Office có đuôi: {last5}\n"); self._set_btns(False)
-            cmd = f'cscript //Nologo "{ospp}" /unpkey:{last5}'
-            threading.Thread(target=run_stream, args=(cmd, self.q), daemon=True).start()
-
-# ====== Public API ======
-def open_window(root, **kwargs):
-    if not _AUTH_TOKEN:
-        tk.Tk().withdraw()
-        messagebox.showerror("Từ chối truy cập", "Vui lòng mở từ main.py sau khi đăng nhập.")
-        return
-    KichHoatUI(root)
-
-if __name__ == "__main__":
-    tk.Tk().withdraw()
-    messagebox.showerror("Từ chối truy cập", "Hãy chạy tiện ích này từ main.py.")
+    create_activation_widgets(window)

@@ -64,6 +64,13 @@ def add_footer(window: tk.Misc):
     link.pack(fill="x")
     link.bind("<Button-1>", lambda e: open_link("https://www.facebook.com/DomBM.Rika/"))
 
+# ===== Auth token (nhận từ main.py) =====
+_AUTH_TOKEN = None
+def authorize(token: str):
+    """Hàm này phải được gọi từ main.py để cho phép mở cửa sổ."""
+    global _AUTH_TOKEN
+    _AUTH_TOKEN = token
+
 # ===== Cấu hình & Hằng số =====
 APP_PAGE_TITLE = "Cài đặt Office"
 ODT_DOWNLOAD_URL = "https://download.microsoft.com/download/2/7/A/27AF1BE6-DD20-4CB4-B154-EBAB8A7D4A7E/officedeploymenttool_16731-20358.exe"
@@ -165,10 +172,14 @@ class OfficeInstallerApp(tk.Toplevel):
     def _action_buttons(self, parent):
         f = ttk.Frame(parent)
         f.pack(fill="x", pady=10)
+        
+        def placeholder_command():
+            messagebox.showinfo("Thông báo", "Tính năng đang được phát triển.")
+
         actions = [
             (" Cài đặt", "install", lambda: self._start("configure")),
             (" Kích hoạt", "activate", lambda: self._start("activate")),
-            (" Cài Ngôn Ngữ", "language", lambda: self._start("install_lang")),
+            (" Cài Ngôn Ngữ", "language", placeholder_command), # Cập nhật ở đây
             (" Tạo shortcut", "shortcut", lambda: self._start("shortcut"))
         ]
         for text, icon, cmd in actions:
@@ -194,7 +205,7 @@ class OfficeInstallerApp(tk.Toplevel):
         lang = LANGUAGES.get(self.lang_var.get(), "en-us")
         xml = f'<Configuration><Add OfficeClientEdition="{bit}" Channel="{ver_info["Channel"]}">'
         if lang_only:
-            xml += f'<Product ID="{ver_info["ID"]}"><Language ID="{lang}" /></Product>'
+            xml += f'<Product ID="LanguagePack"><Language ID="{lang}" /></Product>'
         else:
             excluded = "".join(f'<ExcludeApp ID="{app}" />' for app, var in self.app_vars.items() if not var.get())
             xml += f'<Product ID="{ver_info["ID"]}"><Language ID="{lang}" />{excluded}</Product>'
@@ -321,26 +332,30 @@ class ShortcutWorker(BaseWorker):
             return
 
         self.report("🔍 Đang tìm kiếm shortcut...", "blue")
-        start_menu = os.path.join(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "Microsoft\\Windows\\Start Menu\\Programs")
-        desktop = os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"), "Desktop")
-        found = 0
+        start_menu_path = os.path.join(os.environ['PROGRAMDATA'], 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        found_count = 0
         
         try:
-            if not os.path.exists(start_menu):
-                self.report("❌ Không tìm thấy thư mục Start Menu.", "red", done=True)
+            if not os.path.exists(start_menu_path):
+                self.report(f"❌ Không tìm thấy thư mục Start Menu.", "red", done=True)
                 return
 
-            for item in os.listdir(start_menu):
-                # Kiểm tra xem item có phải là shortcut và có tên trùng với app đã chọn không
-                if item.endswith(".lnk") and any(app.lower() in item.lower() for app in self.selected_apps):
-                    try:
-                        shutil.copy2(os.path.join(start_menu, item), os.path.join(desktop, item))
-                        found += 1
-                    except Exception:
-                        pass # Bỏ qua nếu không copy được
+            # Quét thư mục Start Menu và các thư mục con
+            for root, dirs, files in os.walk(start_menu_path):
+                for filename in files:
+                    if filename.endswith(".lnk"):
+                        if any(app_name.lower() in filename.lower() for app_name in self.selected_apps):
+                            source_path = os.path.join(root, filename)
+                            dest_path = os.path.join(desktop_path, filename)
+                            try:
+                                shutil.copy2(source_path, dest_path)
+                                found_count += 1
+                            except Exception: 
+                                pass
             
-            if found:
-                msg = f"✅ Hoàn tất! Đã tạo {found} shortcut cho các ứng dụng đã chọn."
+            if found_count > 0:
+                msg = f"✅ Hoàn tất! Đã tạo {found_count} shortcut cho các ứng dụng đã chọn."
                 self.report(msg, "green", popup=True)
             else:
                 msg = "ℹ️ Không tìm thấy shortcut nào cho các ứng dụng đã chọn."
@@ -353,10 +368,15 @@ class ShortcutWorker(BaseWorker):
 
 # ===== API cho main.py =====
 def open_window(root: tk.Tk):
+    """API để main.py gọi. Sẽ kiểm tra token trước khi mở."""
+    if not _AUTH_TOKEN:
+        messagebox.showerror("Từ chối truy cập", "Vui lòng mở ứng dụng từ file main.py.")
+        return
     OfficeInstallerApp(root)
 
 # ===== Chặn chạy trực tiếp =====
 if __name__ == "__main__":
+    # Ẩn cửa sổ tkinter gốc không cần thiết
     root = tk.Tk()
-    OfficeInstallerApp(root)
-    root.mainloop()
+    root.withdraw()
+    messagebox.showerror("Từ chối truy cập", "Vui lòng chạy ứng dụng từ file main.py.")

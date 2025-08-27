@@ -94,7 +94,7 @@ class LoginDialog(tk.Toplevel):
         super().__init__(parent)
         self.on_success = on_success
         self.title(APP_TITLE)
-        self.geometry("420x200")
+        self.geometry("400x200")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -156,7 +156,7 @@ class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("980x680")
+        self.geometry("900x500")
         self.resizable(False, False)
         self.configure(bg="#f8f8f8")
 
@@ -269,8 +269,8 @@ class MainApp(tk.Tk):
                     "• Một số tác vụ cần quyền Admin (BitLocker, Windows Update, dọn rác hệ thống).\n"
                     "• Mỗi chức năng mở trong cửa sổ riêng; hãy chạy từ main.py sau khi đăng nhập.\n"
                     "• Thay đổi Hiện/Ẩn file/đuôi cần mở lại File Explorer để áp dụng."
-                    "• Hỗ trợ sửa lỗi mạng, lỗi do treo mạng..."
-                    "• Tính năng sắp tới, sửa lỗi chia sẻ máy in, chia sẻ file qua mạng...."                        
+                    "• Hỗ trợ sửa lỗi mạng, lỗi do treo mạng...\n"
+                    "• Tính năng sắp tới, sửa lỗi chia sẻ máy in, chia sẻ file qua mạng...\n"                        
                  )).pack(fill="both", expand=True)
 
         # Footer
